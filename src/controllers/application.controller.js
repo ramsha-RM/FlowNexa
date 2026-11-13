@@ -1,196 +1,207 @@
+import path from "path";
 import Application from "../models/application.model.js";
 import Job from "../models/job.model.js";
 import User from "../models/auth.model.js";
-import mongoose from "mongoose";
+import ApiError from "../utils/apiError.js";
+import asyncHandler from "../utils/asyncHandler.js";
+import { asString, countsByKey, pageMeta, parsePagination } from "../utils/query.js";
+import { RESUME_DIR, isPdfFile, removeFile, safeDisplayName } from "../utils/files.js";
+import {
+  sendApplicationStatusEmail,
+  sendNewApplicationEmail,
+} from "../services/mail.service.js";
 
-export const applyJob = async (req, res) => {
+const STATUSES = ["Pending", "Accepted", "Rejected"];
+
+const ownerId = (job) => String(job.createdBy?._id || job.createdBy);
+
+const canManageJob = (user, job) => user.role === "admin" || ownerId(job) === String(user._id);
+
+export const applyJob = asyncHandler(async (req, res) => {
+  const uploaded = req.file?.filename;
+  let saved = false;
+
   try {
-    const { jobId } = req.params;
-    const { resume, coverLetter } = req.body;
+    const job = await Job.findById(req.params.jobId);
 
-    const job = await Job.findById(jobId);
-
-    if (!job) {
-      return res.status(404).json({
-        success: false,
-        message: "Job not found",
-      });
+    if (!job) throw new ApiError(404, "Job not found");
+    if (job.status !== "open") {
+      throw new ApiError(400, "This job is not accepting applications");
+    }
+    if (job.deadline && job.deadline < new Date()) {
+      throw new ApiError(400, "The application deadline has passed");
+    }
+    if (!uploaded) throw new ApiError(400, "Please attach your resume as a PDF");
+    if (!(await isPdfFile(uploaded))) {
+      throw new ApiError(400, "The uploaded file is not a valid PDF");
+    }
+    if (await Application.exists({ user: req.user._id, job: job._id })) {
+      throw new ApiError(409, "You have already applied for this job");
     }
 
-
-    const alreadyApplied = await Application.findOne({
-      user: req.user._id,
-      job: jobId,
-    });
-
-    if (alreadyApplied) {
-      return res.status(400).json({
-        success: false,
-        message: "You have already applied for this job",
+    let application;
+    try {
+      application = await Application.create({
+        user: req.user._id,
+        job: job._id,
+        resume: uploaded,
+        resumeOriginalName: safeDisplayName(req.file.originalname),
+        coverLetter: req.body.coverLetter,
       });
+    } catch (error) {
+      if (error.code === 11000) {
+        throw new ApiError(409, "You have already applied for this job");
+      }
+      throw error;
     }
 
-    const application = await Application.create({
-      user: req.user._id,
-      job: jobId,
-      resume,
-      coverLetter,
-    });
+    saved = true;
+
+    User.findById(job.createdBy)
+      .select("name email")
+      .then((employer) => employer && sendNewApplicationEmail(employer, job, req.user))
+      .catch((error) => console.error(`Employer email failed: ${error.message}`));
 
     res.status(201).json({
       success: true,
       message: "Application submitted successfully",
       application,
     });
-  } catch (error) {
-    console.error("Apply Job Error:", error.message);
-
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+  } finally {
+    if (!saved) await removeFile(uploaded);
   }
-};
+});
 
-export const getMyApplications = async (req, res) => {
-  try {
-    const applications = await Application.find({
-      user: req.user._id,
-    }).populate("job", "title company location status");
+export const getMyApplications = asyncHandler(async (req, res) => {
+  const { page, limit, skip } = parsePagination(req.query, 10, 50);
+  const filter = { user: req.user._id };
 
-    res.status(200).json({
-      success: true,
-      applications,
-    });
-  } catch (error) {
-    console.error("Get My Applications Error:", error.message);
+  const status = asString(req.query.status);
+  if (STATUSES.includes(status)) filter.status = status;
 
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+  const [applications, total] = await Promise.all([
+    Application.find(filter)
+      .populate("job", "title company location jobType status deadline")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit),
+    Application.countDocuments(filter),
+  ]);
+
+  res.status(200).json({
+    success: true,
+    ...pageMeta(total, page, limit),
+    applications,
+  });
+});
+
+export const getJobApplicants = asyncHandler(async (req, res) => {
+  const job = await Job.findById(req.params.jobId).select("title company status createdBy");
+
+  if (!job) throw new ApiError(404, "Job not found");
+  if (!canManageJob(req.user, job)) {
+    throw new ApiError(403, "You are not authorized to view these applicants");
   }
-};
 
-export const getJobApplicants = async (req, res) => {
-  try {
-    const { jobId } = req.params;
+  const { page, limit, skip } = parsePagination(req.query, 10, 50);
+  const filter = { job: job._id };
 
-    const job = await Job.findById(jobId);
+  const status = asString(req.query.status);
+  if (STATUSES.includes(status)) filter.status = status;
 
-    if (!job) {
-      return res.status(404).json({
-        success: false,
-        message: "Job not found",
-      });
-    }
+  const [applicants, total, counts] = await Promise.all([
+    Application.find(filter)
+      .populate("user", "name email profilePicture")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit),
+    Application.countDocuments(filter),
+    Application.aggregate([
+      { $match: { job: job._id } },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]),
+  ]);
 
-    if (
-      req.user.role !== "admin" &&
-      job.createdBy.toString() !== req.user._id.toString()
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not authorized to view applicants for this job",
-      });
-    }
+  res.status(200).json({
+    success: true,
+    job: { _id: job._id, title: job.title, company: job.company, status: job.status },
+    counts: countsByKey(counts),
+    ...pageMeta(total, page, limit),
+    applicants,
+  });
+});
 
-    const applications = await Application.find({
-      job: jobId,
-    }).populate("user", "name email");
+export const updateApplicationStatus = asyncHandler(async (req, res) => {
+  const application = await Application.findById(req.params.id)
+    .populate("job", "title company createdBy")
+    .populate("user", "name email");
 
-    res.status(200).json({
-      success: true,
-      applicants: applications,
-    });
-  } catch (error) {
-    console.error("Get Job Applicants Error:", error.message);
-
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+  if (!application || !application.job) {
+    throw new ApiError(404, "Application not found");
   }
-};
 
-export const updateApplicationStatus = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
-
-    const application = await Application.findById(id).populate("job");
-
-    if (!application) {
-      return res.status(404).json({
-        success: false,
-        message: "Application not found",
-      });
-    }
-
-    if (
-      req.user.role !== "admin" &&
-      application.job.createdBy.toString() !== req.user._id.toString()
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not authorized to update this application status",
-      });
-    }
-
-    application.status = status;
-
-    await application.save();
-
-    res.status(200).json({
-      success: true,
-      message: "Application status updated successfully",
-      application,
-    });
-  } catch (error) {
-    console.error("Update Application Error:", error.message);
-
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+  if (!canManageJob(req.user, application.job)) {
+    throw new ApiError(403, "You are not authorized to update this application");
   }
-};
 
-export const deleteApplication = async (req, res) => {
-  try {
-    const { id } = req.params;
+  const previous = application.status;
+  application.status = req.body.status;
+  await application.save();
 
-    const application = await Application.findById(id);
-
-    if (!application) {
-      return res.status(404).json({
-        success: false,
-        message: "Application not found",
-      });
-    }
-
-    if (
-      req.user.role !== "admin" &&
-      application.user.toString() !== req.user._id.toString()
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not authorized to delete this application",
-      });
-    }
-
-    await application.deleteOne();
-
-    res.status(200).json({
-      success: true,
-      message: "Application deleted successfully",
-    });
-  } catch (error) {
-    console.error("Delete Application Error:", error.message);
-
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+  if (previous !== application.status && application.status !== "Pending" && application.user) {
+    sendApplicationStatusEmail(application.user, application.job, application.status).catch(
+      (error) => console.error(`Status email failed: ${error.message}`),
+    );
   }
-};
+
+  res.status(200).json({
+    success: true,
+    message: `Application marked as ${application.status}`,
+    application,
+  });
+});
+
+export const deleteApplication = asyncHandler(async (req, res) => {
+  const application = await Application.findById(req.params.id);
+
+  if (!application) throw new ApiError(404, "Application not found");
+
+  const isOwner = String(application.user) === String(req.user._id);
+  if (!isOwner && req.user.role !== "admin") {
+    throw new ApiError(403, "You are not authorized to delete this application");
+  }
+
+  await removeFile(application.resume);
+  await application.deleteOne();
+
+  res.status(200).json({ success: true, message: "Application removed successfully" });
+});
+
+export const downloadResume = asyncHandler(async (req, res) => {
+  const application = await Application.findById(req.params.id).populate("job", "createdBy");
+
+  if (!application || !application.resume) {
+    throw new ApiError(404, "Resume not found");
+  }
+
+  const isApplicant = String(application.user) === String(req.user._id);
+  const isManager = application.job && canManageJob(req.user, application.job);
+
+  if (!isApplicant && !isManager) {
+    throw new ApiError(403, "You are not authorized to view this resume");
+  }
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename="${safeDisplayName(application.resumeOriginalName)}"`,
+  );
+
+  res.sendFile(path.basename(application.resume), { root: RESUME_DIR, dotfiles: "deny" }, (error) => {
+    if (error && !res.headersSent) {
+      res.status(404).json({ success: false, message: "Resume file is missing" });
+    }
+  });
+});

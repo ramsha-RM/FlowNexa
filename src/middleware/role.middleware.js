@@ -1,17 +1,13 @@
-export const authorize = (...roles) => {
-  return (req, res, next) => {
+import ApiError from "../utils/apiError.js";
+
+export const authorize =
+  (...roles) =>
+  (req, res, next) => {
     if (!req.user) {
-      return res.status(401).json({
-        success: false,
-        message: "Unauthorized",
-      });
+      return next(new ApiError(401, "Unauthorized"));
     }
     if (!roles.includes(req.user.role)) {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied",
-      });
+      return next(new ApiError(403, "You do not have permission to do this"));
     }
     next();
   };
-};

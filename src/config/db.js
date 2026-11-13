@@ -1,7 +1,16 @@
-import mongoose from 'mongoose';
+import mongoose from "mongoose";
 
 let isConnected = false;
 let connectionPromise = null;
+
+mongoose.connection.on("connected", () => {
+  isConnected = true;
+});
+
+mongoose.connection.on("disconnected", () => {
+  isConnected = false;
+  connectionPromise = null;
+});
 
 const connectDB = async () => {
   if (isConnected) {
@@ -12,14 +21,8 @@ const connectDB = async () => {
     return connectionPromise;
   }
 
-  const mongoUri = process.env.MONGO_URI;
-
-  if (!mongoUri) {
-    throw new Error("MONGO_URI is missing in the .env file.");
-  }
-
   try {
-    connectionPromise = mongoose.connect(mongoUri, {
+    connectionPromise = mongoose.connect(process.env.MONGO_URI, {
       serverSelectionTimeoutMS: 15000,
       socketTimeoutMS: 45000,
       family: 4,

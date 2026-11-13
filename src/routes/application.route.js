@@ -1,63 +1,62 @@
 import express from "express";
-
 import {
   applyJob,
-  getMyApplications,
-  getJobApplicants,
-  updateApplicationStatus,
   deleteApplication,
+  downloadResume,
+  getJobApplicants,
+  getMyApplications,
+  updateApplicationStatus,
 } from "../controllers/application.controller.js";
-import { protect } from "../middleware/auth.middleware.js";
+import { protect, requireVerified } from "../middleware/auth.middleware.js";
 import { authorize } from "../middleware/role.middleware.js";
+import { uploadResume } from "../middleware/upload.middleware.js";
 import {
-  validate,
   applicationApplyValidator,
-  applicationIdValidator,
   applicationStatusValidator,
+  idValidator,
   jobIdValidator,
+  listQueryValidator,
+  validate,
 } from "../middleware/validation.middleware.js";
 
 const router = express.Router();
 
+router.use(protect);
+
 router.post(
   "/apply/:jobId",
-  protect,
   authorize("candidate"),
+  requireVerified,
   jobIdValidator,
+  validate,
+  uploadResume,
   applicationApplyValidator,
   validate,
   applyJob,
 );
+
+router.get("/my-applications", authorize("candidate"), listQueryValidator, validate, getMyApplications);
+
 router.get(
-  "/my-applications",
-  protect,
-  authorize("candidate"),
-  getMyApplications,
-);
-router.get(
-  "/job-applicants/:jobId",
-  protect,
+  "/job/:jobId",
   authorize("employer", "admin"),
   jobIdValidator,
+  listQueryValidator,
   validate,
   getJobApplicants,
 );
+
+router.get("/:id/resume", idValidator, validate, downloadResume);
+
 router.put(
-  "/update-status/:id",
-  protect,
+  "/:id/status",
   authorize("employer", "admin"),
-  applicationIdValidator,
+  idValidator,
   applicationStatusValidator,
   validate,
   updateApplicationStatus,
 );
-router.delete(
-  "/delete/:id",
-  protect,
-  authorize("candidate", "admin"),
-  applicationIdValidator,
-  validate,
-  deleteApplication,
-);
+
+router.delete("/:id", authorize("candidate", "admin"), idValidator, validate, deleteApplication);
 
 export default router;

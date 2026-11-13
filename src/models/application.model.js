@@ -17,6 +17,11 @@ const applicationSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+    resumeOriginalName: {
+      type: String,
+      trim: true,
+      default: "resume.pdf",
+    },
     coverLetter: {
       type: String,
       trim: true,
@@ -33,11 +38,19 @@ const applicationSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
+    versionKey: false,
+    toJSON: {
+      transform: (doc, ret) => {
+        ret.hasResume = Boolean(ret.resume);
+        delete ret.resume;
+        return ret;
+      },
+    },
   },
 );
 
 applicationSchema.index({ user: 1, job: 1 }, { unique: true });
+applicationSchema.index({ job: 1, status: 1, createdAt: -1 });
+applicationSchema.index({ user: 1, createdAt: -1 });
 
-const Application = mongoose.model("Application", applicationSchema);
-
-export default Application;
+export default mongoose.model("Application", applicationSchema);

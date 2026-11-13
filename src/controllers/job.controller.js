@@ -1,238 +1,223 @@
-import mongoose from "mongoose";
-import Job from "../models/job.model.js";
+import Job, { JOB_TYPES, EXPERIENCE_LEVELS, JOB_STATUSES } from "../models/job.model.js";
+import Application from "../models/application.model.js";
+import ApiError from "../utils/apiError.js";
+import asyncHandler from "../utils/asyncHandler.js";
+import { asString, countsByKey, pageMeta, parsePagination } from "../utils/query.js";
+import { deleteJobsCascade } from "../services/cleanup.service.js";
 
-// Create Job
-export const createJob = async (req, res) => {
-  try {
-    const {
-      title,
-      company,
-      description,
-      requirements,
-      location,
-      jobType,
-      salaryRange,
-      experienceLevel,
-      deadline,
-    } = req.body;
+const JOB_FIELDS = [
+  "title",
+  "company",
+  "description",
+  "requirements",
+  "location",
+  "jobType",
+  "salaryRange",
+  "experienceLevel",
+  "deadline",
+  "status",
+  "skills",
+  "benefits",
+  "applicationUrl",
+  "isRemote",
+  "category",
+  "openings",
+];
 
-    if (
-      !title ||
-      !company ||
-      !description ||
-      !Array.isArray(requirements) ||
-      requirements.length === 0
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Please provide title, company, description and at least one requirement.",
-      });
+const pickJobFields = (body) =>
+  JOB_FIELDS.reduce((accumulator, field) => {
+    if (Object.prototype.hasOwnProperty.call(body, field)) {
+      accumulator[field] = body[field];
     }
+    return accumulator;
+  }, {});
 
-    const job = await Job.create({
-      title,
-      company,
-      description,
-      requirements,
-      location,
-      jobType,
-      salaryRange,
-      experienceLevel,
-      deadline,
-      createdBy: req.user._id,
-    });
+const ownerId = (job) => String(job.createdBy?._id || job.createdBy);
 
-    res.status(201).json({
-      success: true,
-      message: "Job created successfully",
-      job,
-    });
-  } catch (error) {
-    console.error("Create Job Error:", error.message);
+const canManage = (user, job) => user.role === "admin" || ownerId(job) === String(user._id);
 
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
-  }
+const openFilter = () => ({
+  status: "open",
+  $or: [{ deadline: null }, { deadline: { $gt: new Date() } }],
+});
+
+const withApplicantCounts = async (jobs) => {
+  const ids = jobs.map((job) => job._id);
+  const rows = await Application.aggregate([
+    { $match: { job: { $in: ids } } },
+    {
+      $group: {
+        _id: "$job",
+        total: { $sum: 1 },
+        pending: { $sum: { $cond: [{ $eq: ["$status", "Pending"] }, 1, 0] } },
+      },
+    },
+  ]);
+
+  const map = new Map(rows.map((row) => [String(row._id), row]));
+
+  return jobs.map((job) => {
+    const row = map.get(String(job._id));
+    return {
+      ...job.toObject(),
+      applicantsCount: row?.total || 0,
+      pendingCount: row?.pending || 0,
+    };
+  });
 };
 
-// Get All Jobs
-export const getAllJobs = async (req, res) => {
-  try {
-    const jobs = await Job.find()
-      .populate("createdBy", "name email")
-      .sort({ createdAt: -1 });
+export const createJob = asyncHandler(async (req, res) => {
+  const data = pickJobFields(req.body);
+  data.company = data.company || req.user.company;
 
-    res.status(200).json({
-      success: true,
-      count: jobs.length,
-      jobs,
-    });
-  } catch (error) {
-    console.error("Get Jobs Error:", error.message);
-
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+  if (!data.company) {
+    throw new ApiError(400, "Company name is required");
   }
-};
 
-// Get Single Job
-export const getJobById = async (req, res) => {
-  try {
-    const { id } = req.params;
+  const job = await Job.create({ ...data, createdBy: req.user._id });
 
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid Job ID",
-      });
+  res.status(201).json({ success: true, message: "Job created successfully", job });
+});
+
+export const getAllJobs = asyncHandler(async (req, res) => {
+  const { page, limit, skip } = parsePagination(req.query, 10, 50);
+  const conditions = [];
+
+  if (req.user.role === "admin") {
+    const status = asString(req.query.status);
+    if (JOB_STATUSES.includes(status)) {
+      conditions.push({ status });
     }
-
-    const job = await Job.findById(id).populate(
-      "createdBy",
-      "name email"
-    );
-
-    if (!job) {
-      return res.status(404).json({
-        success: false,
-        message: "Job not found",
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      job,
-    });
-  } catch (error) {
-    console.error("Get Job Error:", error.message);
-
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+  } else {
+    conditions.push(openFilter());
   }
-};
 
-// Update Job
-export const updateJob = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid Job ID",
-      });
-    }
-
-    const job = await Job.findById(id);
-
-    if (!job) {
-      return res.status(404).json({
-        success: false,
-        message: "Job not found",
-      });
-    }
-
-    if (job.createdBy.toString() !== req.user._id.toString()) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not authorized to update this job",
-      });
-    }
-
-    // Prevent updating protected fields from client input
-    const allowedFields = [
-      "title",
-      "company",
-      "description",
-      "requirements",
-      "location",
-      "jobType",
-      "salaryRange",
-      "experienceLevel",
-      "deadline",
-      "status",
-      "skills",
-      "benefits",
-      "applicationUrl",
-      "isRemote",
-      "category",
-      "openings",
-    ];
-
-    const updateData = {};
-    allowedFields.forEach((f) => {
-      if (Object.prototype.hasOwnProperty.call(req.body, f)) {
-        updateData[f] = req.body[f];
-      }
-    });
-
-    const updatedJob = await Job.findByIdAndUpdate(id, updateData, {
-      new: true,
-      runValidators: true,
-    });
-
-    res.status(200).json({
-      success: true,
-      message: "Job updated successfully",
-      job: updatedJob,
-    });
-  } catch (error) {
-    console.error("Update Job Error:", error.message);
-
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+  const q = asString(req.query.q).slice(0, 100);
+  if (q) {
+    const searchTerms = q.replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    conditions.push(searchTerms ? { $text: { $search: searchTerms } } : { _id: null });
   }
-};
 
-// Delete Job
-export const deleteJob = async (req, res) => {
-  try {
-    const { id } = req.params;
+  const jobType = asString(req.query.jobType);
+  if (JOB_TYPES.includes(jobType)) conditions.push({ jobType });
 
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid Job ID",
-      });
-    }
+  const experienceLevel = asString(req.query.experienceLevel);
+  if (EXPERIENCE_LEVELS.includes(experienceLevel)) conditions.push({ experienceLevel });
 
-    const job = await Job.findById(id);
+  if (asString(req.query.remote) === "true") conditions.push({ isRemote: true });
 
-    if (!job) {
-      return res.status(404).json({
-        success: false,
-        message: "Job not found",
-      });
-    }
+  const filter = conditions.length ? { $and: conditions } : {};
+  const sort =
+    asString(req.query.sort) === "oldest"
+      ? { createdAt: 1, _id: 1 }
+      : { createdAt: -1, _id: -1 };
 
-    if (job.createdBy.toString() !== req.user._id.toString()) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not authorized to delete this job",
-      });
-    }
+  const [jobs, total] = await Promise.all([
+    Job.find(filter)
+      .populate("createdBy", "name company")
+      .sort(sort)
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    Job.countDocuments(filter),
+  ]);
 
-    await job.deleteOne();
+  res.status(200).json({
+    success: true,
+    count: jobs.length,
+    ...pageMeta(total, page, limit),
+    jobs,
+  });
+});
 
-    res.status(200).json({
-      success: true,
-      message: "Job deleted successfully",
-    });
-  } catch (error) {
-    console.error("Delete Job Error:", error.message);
+export const getMyJobs = asyncHandler(async (req, res) => {
+  const { page, limit, skip } = parsePagination(req.query, 10, 50);
+  const filter = { createdBy: req.user._id };
 
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
+  const status = asString(req.query.status);
+  if (JOB_STATUSES.includes(status)) filter.status = status;
+
+  const [jobs, total] = await Promise.all([
+    Job.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Job.countDocuments(filter),
+  ]);
+
+  let stats;
+  if (asString(req.query.stats) === "true") {
+    const [jobRows, ids] = await Promise.all([
+      Job.aggregate([
+        { $match: { createdBy: req.user._id } },
+        { $group: { _id: "$status", count: { $sum: 1 } } },
+      ]),
+      Job.find({ createdBy: req.user._id }).distinct("_id"),
+    ]);
+    const applicationRows = await Application.aggregate([
+      { $match: { job: { $in: ids } } },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]);
+    stats = { jobs: countsByKey(jobRows), applications: countsByKey(applicationRows) };
   }
-};
+
+  res.status(200).json({
+    success: true,
+    ...pageMeta(total, page, limit),
+    jobs: await withApplicantCounts(jobs),
+    stats,
+  });
+});
+
+export const getJobById = asyncHandler(async (req, res) => {
+  const job = await Job.findById(req.params.id).populate("createdBy", "name company");
+
+  if (!job || (job.status !== "open" && !canManage(req.user, job))) {
+    throw new ApiError(404, "Job not found");
+  }
+
+  let myApplication = null;
+  if (req.user.role === "candidate") {
+    myApplication = await Application.findOne({ user: req.user._id, job: job._id });
+  }
+
+  res.status(200).json({
+    success: true,
+    job,
+    canManage: canManage(req.user, job),
+    myApplication,
+  });
+});
+
+export const updateJob = asyncHandler(async (req, res) => {
+  const job = await Job.findById(req.params.id);
+
+  if (!job) {
+    throw new ApiError(404, "Job not found");
+  }
+
+  if (!canManage(req.user, job)) {
+    throw new ApiError(403, "You are not authorized to modify this job");
+  }
+
+  const data = pickJobFields(req.body);
+  if (!data.company) data.company = job.company;
+
+  job.set(data);
+  await job.save();
+
+  res.status(200).json({ success: true, message: "Job updated successfully", job });
+});
+
+export const deleteJob = asyncHandler(async (req, res) => {
+  const job = await Job.findById(req.params.id);
+
+  if (!job) {
+    throw new ApiError(404, "Job not found");
+  }
+
+  if (!canManage(req.user, job)) {
+    throw new ApiError(403, "You are not authorized to delete this job");
+  }
+
+  await deleteJobsCascade([job._id]);
+
+  res.status(200).json({ success: true, message: "Job deleted successfully" });
+});

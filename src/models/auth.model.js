@@ -7,37 +7,39 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, "Please provide a name"],
       trim: true,
+      minlength: [2, "Name must be at least 2 characters"],
+      maxlength: [60, "Name cannot exceed 60 characters"],
     },
-
     email: {
       type: String,
       required: [true, "Please provide an email"],
       unique: true,
       trim: true,
       lowercase: true,
-      match: [
-        /^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/,
-        "Please provide a valid email",
-      ],
+      maxlength: 254,
+      match: [/^\S+@\S+\.\S+$/, "Please provide a valid email"],
     },
-
     password: {
       type: String,
-      required: [true, "Please provide a password"],
-      minlength: 6,
+      required: [
+        function () {
+          return this.provider === "local";
+        },
+        "Please provide a password",
+      ],
+      minlength: [8, "Password must be at least 8 characters"],
       select: false,
     },
-
     role: {
       type: String,
-      enum: ["candidate", "employer", "admin"],
+      enum: ["admin", "candidate", "employer"],
       default: "candidate",
     },
-
     company: {
       type: String,
       trim: true,
       default: "",
+      maxlength: [100, "Company name cannot exceed 100 characters"],
     },
     provider: {
       type: String,
@@ -52,23 +54,42 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    isEmailVerified: {
+      type: Boolean,
+      default: false,
+    },
+    emailVerifyToken: { type: String, select: false },
+    emailVerifyExpires: { type: Date, select: false },
+    passwordResetToken: { type: String, select: false },
+    passwordResetExpires: { type: Date, select: false },
+    passwordChangedAt: { type: Date, select: false },
+    loginAttempts: { type: Number, default: 0, select: false },
+    lockUntil: { type: Date, select: false },
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true },
 );
 
 userSchema.pre("save", async function () {
-  if (!this.isModified("password")) return;
-
-  const salt = await bcrypt.genSalt(10);
-  this.password = await bcrypt.hash(this.password, salt);
+  if (!this.isModified("password") || !this.password) return;
+  this.password = await bcrypt.hash(this.password, 12);
 });
 
 userSchema.methods.matchPassword = async function (enteredPassword) {
-  return await bcrypt.compare(enteredPassword, this.password);
+  return bcrypt.compare(enteredPassword, this.password);
 };
 
-const User = mongoose.model("User", userSchema);
+userSchema.methods.toPublic = function () {
+  return {
+    id: this._id,
+    name: this.name,
+    email: this.email,
+    role: this.role,
+    company: this.company,
+    provider: this.provider,
+    profilePicture: this.profilePicture,
+    isEmailVerified: this.isEmailVerified,
+    createdAt: this.createdAt,
+  };
+};
 
-export default User;
+export default mongoose.model("User", userSchema);
