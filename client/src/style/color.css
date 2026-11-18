@@ -1,0 +1,20 @@
+﻿:root {
+  /* FlowNexa forest and sage palette */
+  --palette-1: #051F20;
+  --palette-2: #0B2B26;
+  --palette-3: #163832;
+  --palette-4: #235347;
+  --palette-5: #8EB69B;
+  --palette-6: #DAF1DE;
+
+  --color-primary: var(--palette-2);
+  --color-primary-hover: var(--palette-3);
+  --color-background: #f5f8f5;
+  --color-card: #ffffff;
+  --color-accent: var(--palette-5);
+  --color-text: var(--palette-1);
+  --color-text-muted: #52675d;
+  --color-success: #235347;
+  --color-error: #b54747;
+}
+
